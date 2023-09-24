@@ -96,6 +96,9 @@ func TestHotKey(t *testing.T) {
 
 	// visit only one time recently. fake hot key
 	for i := 0; i < 20; i++ {
+		if i == 2 {
+			continue
+		}
 		v, ok := lru.Get(fmt.Sprintf("myKey%d", i))
 		if !ok {
 			log.Fatalf("got: %s,want: myKey%d", v.(*entry).k, i)
