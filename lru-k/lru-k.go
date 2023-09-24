@@ -2,7 +2,6 @@ package lru_k
 
 import (
 	"container/list"
-	"sync"
 )
 
 type Cache interface {
@@ -33,8 +32,6 @@ type cache struct {
 
 	// callback function for the key before being eliminated
 	onEliminate func(k string, v any)
-
-	mu sync.RWMutex
 }
 
 // entry is used in cache.activeList
@@ -71,8 +68,6 @@ func (c *cache) Get(k string) (v any, ok bool) {
 	if c.isNil() {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if e, ok_ := c.inactiveMap[k]; ok_ { /*first in inactive list*/
 		entry := e.Value.(*entry)
@@ -115,8 +110,6 @@ func (c *cache) Set(k string, v any) {
 	if c.isNil() {
 		c.fill()
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if e, ok_ := c.inactiveMap[k]; ok_ { /*if k is hit in inactive list*/
 		entry := e.Value.(*entry)
@@ -150,8 +143,6 @@ func (c *cache) Remove(k string) {
 	if c.isNil() {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if e, ok_ := c.inactiveMap[k]; ok_ { /*if k is hit in inactive list*/
 		delete(c.inactiveMap, k)
@@ -166,9 +157,6 @@ func (c *cache) Remove(k string) {
 }
 
 func (c *cache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.onEliminate != nil {
 		for _, e := range c.activeMap {
 			kv := e.Value.(*entry)
