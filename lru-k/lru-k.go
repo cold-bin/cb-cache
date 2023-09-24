@@ -7,6 +7,7 @@ import (
 type Cache interface {
 	Get(k string) (v any, ok bool)
 	Set(k string, v any)
+	Len() int
 	Remove(k string)
 	Clear()
 }
@@ -14,7 +15,7 @@ type Cache interface {
 // cache is an LRU-2 cache. It is not safe for concurrent access
 type cache struct {
 	k int
-	// item's max number of cache
+	// item's max number of cache. if zero, no limit for activeList and inactiveList
 	maxItem int
 	// the max size of inactiveList
 	inactiveLimit int
@@ -54,13 +55,14 @@ func NewCache(k int, opts ...Option) Cache {
 		opt(c)
 	}
 
-	if c.maxItem < c.inactiveLimit {
+	if c.maxItem != 0 && c.maxItem <= c.inactiveLimit {
 		panic("[cb-cache]: maxItem is more than inactiveLimit")
 	}
 
 	if k < 2 {
-		panic("[cb-cache]: k is less than 2")
+		panic("[cb-cache]: k is more than 2")
 	}
+
 	return c
 }
 
@@ -97,7 +99,7 @@ func (c *cache) moveToRealCache(entry_ *entry, e *list.Element) {
 	c.inactiveList.Remove(e)
 	delete(c.inactiveMap, entry_.k)
 
-	if c.activeList.Len() > c.maxItem-c.inactiveLimit { /*eliminate*/
+	if c.maxItem != 0 && c.activeList.Len() > c.maxItem-c.inactiveLimit { /*eliminate*/
 		ele := c.activeList.Remove(c.activeList.Back()).(*entry)
 		if c.onEliminate != nil {
 			c.onEliminate(entry_.k, entry_.v)
@@ -129,7 +131,7 @@ func (c *cache) Set(k string, v any) {
 	} else { /*not in cache,place the item inactive list*/
 		e := c.inactiveList.PushFront(&entry{k: k, v: v})
 		c.inactiveMap[k] = e
-		if c.inactiveLimit < c.inactiveList.Len() {
+		if c.maxItem != 0 && c.inactiveLimit < c.inactiveList.Len() {
 			ele := c.inactiveList.Remove(c.inactiveList.Back()).(*entry)
 			if c.onEliminate != nil {
 				c.onEliminate(ele.k, ele.v)
@@ -166,6 +168,13 @@ func (c *cache) Clear() {
 	c.activeMap = nil
 	c.inactiveMap = nil
 	c.activeList = nil
+}
+
+func (c *cache) Len() int {
+	if c.isNil() {
+		return 0
+	}
+	return len(c.inactiveMap) + len(c.activeMap)
 }
 
 func (c *cache) isNil() bool {
