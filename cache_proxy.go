@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	lruk "github.com/cold-bin/cb-cache/lru-k"
+	"log"
 	"sync"
 )
 
@@ -19,6 +20,8 @@ type Group struct {
 	namespace string
 	cache     cacheProxy
 	getter    GetterFunc // if got not in cache, use getter. this maybe prevent cache breakdown
+
+	peers PeerPicker // as a remote get-function from the other peers.
 }
 
 type GOption func(*Group)
@@ -67,12 +70,34 @@ func GetGroup(name string) *Group {
 	return g
 }
 
+func (g *Group) PutPeers(pp PeerPicker) {
+	if g.peers != nil {
+		return
+	}
+
+	g.peers = pp
+}
+
 func (g *Group) Get(ctx context.Context, k string) (ByteView, error) {
 	if k == "" {
 		return ByteView{}, ErrKeyEmpty
 	}
 
-	// first step, got in cache
+	// first step, try to get v from the remote peers
+	if g.peers != nil {
+		if peer, ok := g.peers.PickPeer(k); ok {
+			var (
+				err error
+				v   []byte
+			)
+			if v, err = peer.Get(g.namespace, k); err == nil {
+				return ByteView{b: v}, nil
+			}
+			log.Println("[cb-cache] failed to get from peer:", err)
+		}
+	}
+
+	// second step, got in cache locally
 	if bw, ok := g.cache.get(k); ok {
 		return bw, nil
 	}
