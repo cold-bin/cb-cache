@@ -35,7 +35,7 @@ type cache struct {
 	onEliminate func(k string, v any)
 }
 
-// entry is used in cache.activeList
+// entry is used in cache.inactiveList
 type entry struct {
 	k   string
 	v   any
