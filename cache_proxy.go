@@ -45,7 +45,7 @@ func NewGroup(namespace string, maxitems int, opts ...GOption) *Group {
 		getter: func(ctx context.Context, k string) (v []byte, err error) {
 			return []byte{}, nil
 		}, /*default getter*/
-		cache: cacheProxy{cache: lruk.NewCache(2, lruk.WithMaxItem(maxitems))}, /*default cache*/
+		cache: cacheProxy{cache: lruk.NewCache(2, lruk.WithMaxItem(maxitems), lruk.WithInactiveLimit(maxitems/2))}, /*default cache*/
 	}
 	for _, opt := range opts {
 		opt(g)
