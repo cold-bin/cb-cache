@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	lruk "github.com/cold-bin/cb-cache/lru-k"
+	"github.com/cold-bin/cb-cache/safe"
+	"github.com/cold-bin/cb-cache/serialization/pb"
 	"log"
 	"sync"
 )
@@ -21,7 +23,8 @@ type Group struct {
 	cache     cacheProxy
 	getter    GetterFunc // if got not in cache, use getter. this maybe prevent cache breakdown
 
-	peers PeerPicker // as a remote get-function from the other peers.
+	peers  PeerPicker  // as a remote get-function from the other peers.
+	loader *safe.Group // make sure that every key is visited only once at the same time
 }
 
 type GOption func(*Group)
@@ -48,7 +51,8 @@ func NewGroup(namespace string, maxitems int, opts ...GOption) *Group {
 		getter: func(ctx context.Context, k string) (v []byte, err error) {
 			return []byte{}, nil
 		}, /*default getter*/
-		cache: cacheProxy{cache: lruk.NewCache(2, lruk.WithMaxItem(maxitems), lruk.WithInactiveLimit(maxitems/2))}, /*default cache*/
+		cache:  cacheProxy{cache: lruk.NewCache(2, lruk.WithMaxItem(maxitems), lruk.WithInactiveLimit(maxitems/2))}, /*default cache*/
+		loader: &safe.Group{},
 	}
 	for _, opt := range opts {
 		opt(g)
@@ -84,23 +88,29 @@ func (g *Group) Get(ctx context.Context, k string) (ByteView, error) {
 	}
 
 	// first step, try to get v from the remote peers
-	if g.peers != nil {
-		if peer, ok := g.peers.PickPeer(k); ok {
-			var (
-				err error
-				v   []byte
-			)
-			if v, err = peer.Get(g.namespace, k); err == nil {
-				return ByteView{b: v}, nil
+	fn := func() (any, error) {
+		if g.peers != nil {
+			if peer, ok := g.peers.PickPeer(k); ok {
+				var (
+					err error
+					req = &pb.Request{Group: g.namespace, Key: k}
+					res = &pb.Response{}
+				)
+				if res, err = peer.Get(ctx, req); err == nil {
+					return ByteView{b: res.Value}, nil
+				}
+				log.Println("[cb-cache] failed to get from peer:", err)
 			}
-			log.Println("[cb-cache] failed to get from peer:", err)
 		}
-	}
 
-	// second step, got in cache locally
-	if bw, ok := g.cache.get(k); ok {
-		return bw, nil
+		// second step, got in cache locally
+		if bw, ok := g.cache.get(k); ok {
+			return bw, nil
+		}
+
+		return ByteView{}, nil
 	}
+	g.loader.Once(k, fn)
 
 	// not got in cache, then got in g.Getter and store in cache locally
 	bs, err := g.getter(ctx, k)

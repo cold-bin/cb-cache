@@ -1,7 +1,10 @@
 package cb_cache
 
 import (
+	"context"
 	"fmt"
+	"github.com/cold-bin/cb-cache/serialization"
+	"github.com/cold-bin/cb-cache/serialization/pb"
 	"io"
 	"net/http"
 	"net/url"
@@ -15,15 +18,21 @@ type PeerPicker interface {
 
 // PeerGetter is the interface that must be implemented by a peers.
 type PeerGetter interface {
-	Get(group string, key string) ([]byte, error)
+	Get(ctx context.Context, req *pb.Request) (_r *pb.Response, _err error)
 }
 
 type httpGetter struct {
-	baseURL string
+	baseURL    string
+	serializer serialization.Serializer
 }
 
-func (h *httpGetter) Get(group string, key string) ([]byte, error) {
-	res, err := http.Get(fmt.Sprintf("%v%v/%v", h.baseURL, url.QueryEscape(group), url.QueryEscape(key)))
+func (h *httpGetter) Get(ctx context.Context, req *pb.Request) (_r *pb.Response, _err error) {
+	res, err := http.Get(fmt.Sprintf(
+		"%v%v/%v",
+		h.baseURL,
+		url.QueryEscape(req.GetGroup()),
+		url.QueryEscape(req.GetKey()),
+	))
 	if err != nil {
 		return nil, err
 	}
@@ -38,5 +47,11 @@ func (h *httpGetter) Get(group string, key string) ([]byte, error) {
 		return nil, fmt.Errorf("reading response body: %v", err)
 	}
 
-	return bytes, nil
+	// unmarshal
+	_r = &pb.Response{}
+	if err = h.serializer.Unmarshal(bytes, _r); err != nil {
+		return nil, err
+	}
+
+	return _r, nil
 }
