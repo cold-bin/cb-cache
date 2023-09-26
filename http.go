@@ -1,9 +1,10 @@
 package cb_cache
 
 import (
-	"context"
 	"fmt"
 	"github.com/cold-bin/cb-cache/consistencyhash"
+	"github.com/cold-bin/cb-cache/serialization"
+	"github.com/cold-bin/cb-cache/serialization/pb"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,15 +24,34 @@ type HTTPPool struct {
 	peers       *consistencyhash.Map   // store all of peers
 	httpGetters map[string]*httpGetter // key marks different peers, like self
 
-	mu sync.Mutex
+	serializer serialization.Serializer // dependency inject
+	mu         sync.Mutex
+}
+
+type HPOpt func(*HTTPPool)
+
+func WithSerializer(codec serialization.Serializer) HPOpt {
+	return func(pool *HTTPPool) {
+		pool.serializer = codec
+	}
 }
 
 // NewHTTPPool initializes an HTTP pool of peers.
-func NewHTTPPool(self string) *HTTPPool {
-	return &HTTPPool{
+func NewHTTPPool(self string, opts ...HPOpt) *HTTPPool {
+	h := &HTTPPool{
 		self:     self,
 		basePath: defaultBasePath,
 	}
+
+	for _, opt := range opts {
+		opt(h)
+	}
+
+	if h.serializer == nil {
+		h.serializer = &serialization.Protobuf{}
+	}
+
+	return h
 }
 
 // proxy all http requests
@@ -50,14 +70,20 @@ func (c *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	groupname, key := ss[0], ss[1]
 	group := GetGroup(groupname)
 
-	bv, err := group.Get(context.Background(), key)
+	bv, err := group.Get(r.Context(), key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusOK)
 		return
 	}
 
+	// marshal
+	bs, err := c.serializer.Marshal(&pb.Response{Value: bv.ByteSlice()})
+	if err != nil {
+		return
+	}
+
 	w.Header().Add("Content-Type", "application/octet-stream")
-	if _, err = w.Write(bv.ByteSlice()); err != nil {
+	if _, err = w.Write(bs); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -82,6 +108,7 @@ func (c *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
 
 	if peer := c.peers.Get(key); peer != "" && peer != c.self {
 		getter, ok := c.httpGetters[peer]
+		getter.serializer = c.serializer
 		return getter, ok
 	}
 
