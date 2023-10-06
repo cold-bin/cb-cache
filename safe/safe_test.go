@@ -65,3 +65,31 @@ func TestDoDupSuppress(t *testing.T) {
 		t.Errorf("number of calls = %d; want 1", got)
 	}
 }
+
+// simulate extreme concurrency scenarios
+func TestMaxgVisit(t *testing.T) {
+	g := &Group{maxg: 10}
+	calls := 100000
+	flag := false
+	mu := &sync.RWMutex{}
+	wg := sync.WaitGroup{}
+	for i := 0; i < calls; i++ {
+		wg.Add(1)
+		i_ := i
+		go func() {
+			ans, err := g.Once("key", func() (any, error) {
+				return i_, nil
+			})
+			mu.Lock()
+			flag = flag || err != nil
+			mu.Unlock()
+			fmt.Println(ans)
+		}()
+		wg.Done()
+	}
+	wg.Wait()
+
+	if !flag {
+		t.Error("should have error: server busy")
+	}
+}
