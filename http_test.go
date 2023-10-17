@@ -25,7 +25,7 @@ func TestNewHTTPPool(t *testing.T) {
 			return nil, fmt.Errorf("%s not exist", k)
 		}))
 	addr := "localhost:9999"
-	peers := NewHTTPPool(addr, WithSerializer(&serialization.Gob{}))
+	peers := NewHTTPPool(addr, 50, WithSerializer(&serialization.Gob{}))
 	log.Println("cb-cache is running at", addr)
 	http.ListenAndServe(addr, peers)
 }

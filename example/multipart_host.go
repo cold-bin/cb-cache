@@ -47,7 +47,7 @@ func createGroup(i int) *cb_cache.Group {
 }
 
 func startCacheServer(addr string, addrs []string, gee *cb_cache.Group) {
-	peers := cb_cache.NewHTTPPool(addr)
+	peers := cb_cache.NewHTTPPool(addr, 50)
 	peers.Set(addrs...)
 	gee.PutPeers(peers)
 	log.Println("server is running at", addr)
@@ -65,6 +65,9 @@ func startAPIServer(apiAddr string, gee *cb_cache.Group) {
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Write(view.ByteSlice())
+			go func() {
+				gee.Stats.PrintEasyStatisticsInGroup()
+			}()
 		}))
 	log.Println("api server is running at", apiAddr)
 	log.Fatal(http.ListenAndServe(apiAddr[7:], nil))
