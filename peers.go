@@ -26,6 +26,7 @@ type httpGetter struct {
 	serializer serialization.Serializer
 }
 
+// Get send request to the closest server in order to get peer's cache data
 func (h *httpGetter) Get(ctx context.Context, req *pb.Request) (_r *pb.Response, _err error) {
 	res, err := http.Get(fmt.Sprintf(
 		"%v%v/%v",
