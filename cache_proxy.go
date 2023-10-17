@@ -3,16 +3,68 @@ package cb_cache
 import (
 	"context"
 	"errors"
+	"fmt"
+
 	lruk "github.com/cold-bin/cb-cache/lru-k"
 	"github.com/cold-bin/cb-cache/safe"
 	"github.com/cold-bin/cb-cache/serialization/pb"
-	"log"
 	"sync"
+	"sync/atomic"
 )
 
 var (
 	ErrKeyEmpty = errors.New("[cb-cache] k is empty")
 )
+
+// Stats should be operated atomically
+type Stats struct {
+	Gets             uint64 // any Get request, including from peers
+	CacheHits        uint64 // local cache hit
+	PeerLoads        uint64 // either remote load or remote cache hit (not an error)
+	PeerErrors       uint64
+	GetterFuncFrom   uint64 // total good getter loads
+	GetterFuncFailed uint64 // total bad getter loads
+	ServerRequests   uint64 // gets that came over the network from peers
+
+	rlock sync.RWMutex
+}
+
+type StatsCopy struct {
+	Gets             uint64 // any Get request, including from peers
+	CacheHits        uint64 // local cache hit
+	PeerLoads        uint64 // either remote load or remote cache hit (not an error)
+	PeerErrors       uint64
+	GetterFuncFrom   uint64 // total good getter loads
+	GetterFuncFailed uint64 // total bad getter loads
+	ServerRequests   uint64 // gets that came over the network from peers
+}
+
+// PrintEasyStatisticsInGroup
+//
+//	cache hit rate, peer load rate, rate of data from network etc...
+func (s *Stats) PrintEasyStatisticsInGroup() {
+	s.rlock.RLock()
+	state := &Stats{
+		Gets:             s.Gets,
+		CacheHits:        s.CacheHits,
+		PeerLoads:        s.PeerLoads,
+		PeerErrors:       s.PeerErrors,
+		GetterFuncFrom:   s.GetterFuncFrom,
+		GetterFuncFailed: s.GetterFuncFailed,
+		ServerRequests:   s.ServerRequests,
+	}
+	s.rlock.RUnlock()
+	if state.Gets == 0 {
+		fmt.Println("gets is zero")
+		return
+	}
+	fmt.Println(fmt.Sprintf(
+		" cache rate: %.2f%% \n peer load rate: %.2f%% \n data from network: %.2f%% \n",
+		float64(state.CacheHits)/float64(state.Gets)*100,
+		float64(state.PeerLoads)/float64(state.Gets)*100,
+		float64(state.ServerRequests)/float64(state.Gets)*100,
+	))
+}
 
 // GetterFunc implement Getter in order to Pass in the get function directly
 type GetterFunc func(ctx context.Context, k string) (v []byte, err error)
@@ -25,6 +77,8 @@ type Group struct {
 
 	peers  PeerPicker  // as a remote get-function from the other peers.
 	loader *safe.Group // make sure that every key is visited only once at the same time
+
+	Stats Stats // statics data of every group
 }
 
 type GOption func(*Group)
@@ -94,8 +148,17 @@ func (g *Group) Get(ctx context.Context, k string) (ByteView, error) {
 	if k == "" {
 		return ByteView{}, ErrKeyEmpty
 	}
+	atomic.AddUint64(&g.Stats.Gets, 1)
 
-	// first step, try to get v from the remote peers
+	// first,try to get v from local cache
+	value, cacheHit := g.localCache(k)
+	if cacheHit {
+		//_, file, line, _ := runtime.Caller(3)
+		//log.Println(file+" "+strconv.Itoa(line), "local cache hit:", k, value)
+		atomic.AddUint64(&g.Stats.CacheHits, 1)
+		return value, nil
+	}
+	// second,try to get v from the remote peers
 	fn := func() (any, error) {
 		if g.peers != nil {
 			if peer, ok := g.peers.PickPeer(k); ok {
@@ -105,30 +168,43 @@ func (g *Group) Get(ctx context.Context, k string) (ByteView, error) {
 					res = &pb.Response{}
 				)
 				if res, err = peer.Get(ctx, req); err == nil {
+					atomic.AddUint64(&g.Stats.PeerLoads, 1)
+					//_, file, line, _ := runtime.Caller(3)
+					//log.Println(file+" "+strconv.Itoa(line), "distributed cache hit:", k, string(res.Value))
+
+					// should not store the remote data from other peers
 					return ByteView{b: res.Value}, nil
 				}
-				log.Println("[cb-cache] failed to get from peer:", err)
+				atomic.AddUint64(&g.Stats.PeerErrors, 1)
 			}
 		}
 
-		// second step, got in cache locally
-		if bw, ok := g.cache.get(k); ok {
-			return bw, nil
+		// not got in cache, then got in g.Getter and store in cache locally
+		bs, err := g.getter(ctx, k)
+		if err != nil {
+			atomic.AddUint64(&g.Stats.GetterFuncFailed, 1)
+			return ByteView{}, err
 		}
+		//_, file, line, _ := runtime.Caller(3)
+		//log.Println(file+" "+strconv.Itoa(line), "getter function hit:", k, string(bs))
+		atomic.AddUint64(&g.Stats.GetterFuncFrom, 1)
+		bw := ByteView{b: cloneBytes(bs)}
+		// populate local cache
+		g.cache.set(k, bw)
 
-		return ByteView{}, nil
+		return bw, nil
 	}
-	g.loader.Once(k, fn)
 
-	// not got in cache, then got in g.Getter and store in cache locally
-	bs, err := g.getter(ctx, k)
-	if err != nil {
-		return ByteView{}, err
-	}
-	bw := ByteView{b: cloneBytes(bs)}
-	g.cache.set(k, bw)
+	v, err := g.loader.Once(k, fn)
+	return v.(ByteView), err
+}
 
-	return bw, nil
+func (g *Group) localCache(k string) (value ByteView, ok bool) {
+	return g.cache.get(k)
+}
+
+func (g *Group) CacheStates() CacheStats {
+	return g.cache.stats()
 }
 
 // cacheProxy proxy of lru_k.cache to add other functions,
