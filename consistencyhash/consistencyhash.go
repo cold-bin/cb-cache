@@ -36,7 +36,7 @@ func NewMap(replica int, opts ...MOpt) *Map {
 	if m.hash == nil {
 		m.hash = crc32.ChecksumIEEE
 	}
-	if replica < 0 {
+	if replica <= 0 {
 		panic("illegal replica")
 	}
 
