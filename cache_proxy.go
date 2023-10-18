@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	lruk "github.com/cold-bin/cb-cache/lru-k"
 	"github.com/cold-bin/cb-cache/safe"
@@ -77,6 +78,7 @@ type Group struct {
 
 	peers  PeerPicker  // as a remote get-function from the other peers.
 	loader *safe.Group // make sure that every key is visited only once at the same time
+	q      *queue
 
 	Stats Stats // statics data of every group
 }
@@ -104,6 +106,12 @@ func WithGetter(getter GetterFunc) GOption {
 	}
 }
 
+func WithMakeQueue(cap int) GOption {
+	return func(g *Group) {
+		g.q.keys = make(chan string, cap)
+	}
+}
+
 func NewGroup(namespace string, maxitems int, opts ...GOption) *Group {
 	gmu.Lock()
 	defer gmu.Unlock()
@@ -115,11 +123,13 @@ func NewGroup(namespace string, maxitems int, opts ...GOption) *Group {
 		}, /*default getter*/
 		cache:  cacheProxy{cache: lruk.NewCache(2, lruk.WithMaxItem(maxitems), lruk.WithInactiveLimit(maxitems/2))}, /*default cache*/
 		loader: &safe.Group{},
+		q:      &queue{},
 	}
 	for _, opt := range opts {
 		opt(g)
 	}
 	groups[namespace] = g
+	go g.watch()
 	return g
 }
 
@@ -127,6 +137,8 @@ var (
 	gmu    sync.RWMutex // used in lock groups
 	groups = make(map[string]*Group)
 )
+
+const DefaultQueueCap = 50
 
 // GetGroup get group in read-lock
 func GetGroup(name string) *Group {
@@ -203,6 +215,33 @@ func (g *Group) localCache(k string) (value ByteView, ok bool) {
 	return g.cache.get(k)
 }
 
+func (g *Group) Remove(k string) {
+	g.cache.remove(k)
+}
+
+// watch polling monitors expired keys and deletes them
+// should be started in making Group
+func (g *Group) watch() {
+	if g.q.keys == nil {
+		g.q.keys = make(chan string, DefaultQueueCap)
+	}
+	defer func() { close(g.q.keys) }()
+
+	for {
+		//log.Println("watch: ", g.namespace)
+		k := g.q.subscribe()
+		//log.Println("get k:", k)
+		g.Remove(k)
+		//log.Println("remove:", k)
+		time.Sleep(time.Second) // delay one second to avoid to reduce cache hit rate and get lock frequently
+	}
+}
+
+// Publish not blocked
+func (g *Group) Publish(k string) {
+	go g.q.Publish(k)
+}
+
 func (g *Group) CacheStates() CacheStats {
 	return g.cache.stats()
 }
@@ -270,6 +309,14 @@ func (c *cacheProxy) get(key string) (value ByteView, ok bool) {
 	}
 
 	return
+}
+
+func (c *cacheProxy) remove(k string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.nevict--
+	c.cache.Remove(k)
 }
 
 // CacheStats is state of current cache

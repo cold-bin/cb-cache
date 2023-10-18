@@ -58,11 +58,22 @@ func startAPIServer(apiAddr string, gee *cb_cache.Group) {
 	http.Handle("/api", http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			key := r.URL.Query().Get("key")
+			if key == "change_cache" {
+				db[0]["a"] = "a"
+				db[1]["d"] = "d"
+				db[2]["g"] = "g"
+				log.Println(db)
+				gee.Publish("a")
+				gee.Publish("d")
+				gee.Publish("g")
+				return
+			}
 			view, err := gee.Get(context.Background(), key)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Write(view.ByteSlice())
 			go func() {
