@@ -8,17 +8,13 @@ type Cache interface {
 	Get(k string) (v any, ok bool)
 	Set(k string, v any)
 	Len() int
-	Remove(k string)
+	RemoveOldest()
 	Clear()
 }
 
 // cache is an LRU-2 cache. It is not safe for concurrent access
 type cache struct {
 	k int
-	// item's max number of cache. if zero, no limit for activeList and inactiveList
-	maxItem int
-	// the max size of inactiveList
-	inactiveLimit int
 
 	// InactiveList just store keys and values that is
 	// visited less than 2 times and also use lru. these keys may be inactive,
@@ -53,10 +49,6 @@ func NewCache(k int, opts ...Option) Cache {
 
 	for _, opt := range opts {
 		opt(c)
-	}
-
-	if c.maxItem != 0 && c.maxItem <= c.inactiveLimit {
-		panic("[cb-cache]: maxItem is more than inactiveLimit")
 	}
 
 	if k < 2 {
@@ -98,14 +90,6 @@ func (c *cache) moveToRealCache(entry_ *entry, e *list.Element) {
 	c.activeMap[entry_.k] = e
 	c.inactiveList.Remove(e)
 	delete(c.inactiveMap, entry_.k)
-
-	if c.maxItem != 0 && c.activeList.Len() > c.maxItem-c.inactiveLimit { /*eliminate*/
-		ele := c.activeList.Remove(c.activeList.Back()).(*entry)
-		if c.onEliminate != nil {
-			c.onEliminate(entry_.k, entry_.v)
-		}
-		delete(c.activeMap, ele.k)
-	}
 }
 
 func (c *cache) Set(k string, v any) {
@@ -131,30 +115,25 @@ func (c *cache) Set(k string, v any) {
 	} else { /*not in cache,place the item inactive list*/
 		e := c.inactiveList.PushFront(&entry{k: k, v: v})
 		c.inactiveMap[k] = e
-		if c.maxItem != 0 && c.inactiveLimit < c.inactiveList.Len() {
-			ele := c.inactiveList.Remove(c.inactiveList.Back()).(*entry)
-			if c.onEliminate != nil {
-				c.onEliminate(ele.k, ele.v)
-			}
-			delete(c.inactiveMap, ele.k)
-		}
 	}
 }
 
-func (c *cache) Remove(k string) {
+// RemoveOldest lru-2 evict be called by high layer
+func (c *cache) RemoveOldest() {
 	if c.isNil() {
 		return
 	}
 
-	if e, ok_ := c.inactiveMap[k]; ok_ { /*if k is hit in inactive list*/
-		delete(c.inactiveMap, k)
-		c.inactiveList.Remove(e)
+	if len(c.inactiveMap) != 0 {
+		e := c.inactiveList.Remove(c.inactiveList.Back()).(*entry)
+		delete(c.inactiveMap, e.k)
 		return
 	}
 
-	if e, ok_ := c.activeMap[k]; ok_ { /*maybe hit in active list*/
-		delete(c.activeMap, k)
-		c.activeList.Remove(e)
+	if len(c.activeMap) != 0 {
+		e := c.activeList.Remove(c.activeList.Back()).(*entry)
+		delete(c.activeMap, e.k)
+		return
 	}
 }
 

@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
-
 	lruk "github.com/cold-bin/cb-cache/lru-k"
 	"github.com/cold-bin/cb-cache/safe"
 	"github.com/cold-bin/cb-cache/serialization/pb"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 )
@@ -20,8 +19,8 @@ var (
 // Stats should be operated atomically
 type Stats struct {
 	Gets             uint64 // any Get request, including from peers
-	CacheHits        uint64 // local cache hit
-	PeerLoads        uint64 // either remote load or remote cache hit (not an error)
+	CacheHits        uint64 // local mainCache hit
+	PeerLoads        uint64 // either remote load or remote mainCache hit (not an error)
 	PeerErrors       uint64
 	GetterFuncFrom   uint64 // total good getter loads
 	GetterFuncFailed uint64 // total bad getter loads
@@ -32,8 +31,8 @@ type Stats struct {
 
 type StatsCopy struct {
 	Gets             uint64 // any Get request, including from peers
-	CacheHits        uint64 // local cache hit
-	PeerLoads        uint64 // either remote load or remote cache hit (not an error)
+	CacheHits        uint64 // local mainCache hit
+	PeerLoads        uint64 // either remote load or remote mainCache hit (not an error)
 	PeerErrors       uint64
 	GetterFuncFrom   uint64 // total good getter loads
 	GetterFuncFailed uint64 // total bad getter loads
@@ -42,7 +41,7 @@ type StatsCopy struct {
 
 // PrintEasyStatisticsInGroup
 //
-//	cache hit rate, peer load rate, rate of data from network etc...
+//	mainCache hit rate, peer load rate, rate of data from network etc...
 func (s *Stats) PrintEasyStatisticsInGroup() {
 	s.rlock.RLock()
 	state := &Stats{
@@ -70,29 +69,32 @@ func (s *Stats) PrintEasyStatisticsInGroup() {
 // GetterFunc implement Getter in order to Pass in the get function directly
 type GetterFunc func(ctx context.Context, k string) (v []byte, err error)
 
-// Group is divided by namespace,and cache is different every Group
+// Group is divided by namespace,and mainCache is different every Group
 type Group struct {
 	namespace string
-	cache     cacheProxy
-	getter    GetterFunc // if got not in cache, use getter. this maybe prevent cache breakdown
+	nBytes    int64 // max bytes
 
+	mainCache cacheProxy // cached hot keys from local machine
+	hotCache  cacheProxy // cached hot keys from remote machine to avoid to request the same keys again
+
+	getter GetterFunc  // if got not in mainCache, use getter. this maybe prevent mainCache breakdown
 	peers  PeerPicker  // as a remote get-function from the other peers.
 	loader *safe.Group // make sure that every key is visited only once at the same time
-	q      *queue
 
 	Stats Stats // statics data of every group
 }
 
 type GOption func(*Group)
 
-// WithRetirementPolicy Provides a self-implementing cache retirement strategy
-func WithRetirementPolicy(cache lruk.Cache) GOption {
+// WithRetirementPolicy Provides a self-implementing mainCache retirement strategy
+func WithRetirementPolicy(cache1, cache2 lruk.Cache) GOption {
 	return func(g *Group) {
-		g.cache.cache = cache
+		g.mainCache.cache = cache1
+		g.hotCache.cache = cache2
 	}
 }
 
-// WithConcurrentMaxGNum prevents goroutines blocking issues caused by a large number of client accesses when the cache is broken down.
+// WithConcurrentMaxGNum prevents goroutines blocking issues caused by a large number of client accesses when the mainCache is broken down.
 // if maxg <=0, mean that there is no limit to visit
 func WithConcurrentMaxGNum(maxg int64) GOption {
 	return func(g *Group) {
@@ -106,30 +108,34 @@ func WithGetter(getter GetterFunc) GOption {
 	}
 }
 
-func WithMakeQueue(cap int) GOption {
-	return func(g *Group) {
-		g.q.keys = make(chan string, cap)
-	}
-}
-
-func NewGroup(namespace string, maxitems int, opts ...GOption) *Group {
+// NewGroup
+// nBytes: max bytes of group
+// maxitems: config of lru-k
+// nBytes will
+func NewGroup(namespace string, nBytes int64, maxitems int, opts ...GOption) *Group {
 	gmu.Lock()
 	defer gmu.Unlock()
 
+	if _, dup := groups[namespace]; dup {
+		panic("duplicate registration of group " + namespace)
+	}
+
 	g := &Group{
 		namespace: namespace,
+		nBytes:    nBytes,
+		mainCache: cacheProxy{cache: lruk.NewCache(2)},
+		hotCache:  cacheProxy{cache: lruk.NewCache(2)},
 		getter: func(ctx context.Context, k string) (v []byte, err error) {
 			return []byte{}, nil
 		}, /*default getter*/
-		cache:  cacheProxy{cache: lruk.NewCache(2, lruk.WithMaxItem(maxitems), lruk.WithInactiveLimit(maxitems/2))}, /*default cache*/
 		loader: &safe.Group{},
-		q:      &queue{},
 	}
+
 	for _, opt := range opts {
 		opt(g)
 	}
 	groups[namespace] = g
-	go g.watch()
+
 	return g
 }
 
@@ -148,6 +154,10 @@ func GetGroup(name string) *Group {
 	return g
 }
 
+func (g *Group) Name() string {
+	return g.namespace
+}
+
 func (g *Group) PutPeers(pp PeerPicker) {
 	if g.peers != nil {
 		return
@@ -162,14 +172,13 @@ func (g *Group) Get(ctx context.Context, k string) (ByteView, error) {
 	}
 	atomic.AddUint64(&g.Stats.Gets, 1)
 
-	// first,try to get v from local cache
+	// first,try to get v from main cache and hot cache
 	value, cacheHit := g.localCache(k)
 	if cacheHit {
-		//_, file, line, _ := runtime.Caller(3)
-		//log.Println(file+" "+strconv.Itoa(line), "local cache hit:", k, value)
 		atomic.AddUint64(&g.Stats.CacheHits, 1)
 		return value, nil
 	}
+
 	// second,try to get v from the remote peers
 	fn := func() (any, error) {
 		if g.peers != nil {
@@ -181,28 +190,30 @@ func (g *Group) Get(ctx context.Context, k string) (ByteView, error) {
 				)
 				if res, err = peer.Get(ctx, req); err == nil {
 					atomic.AddUint64(&g.Stats.PeerLoads, 1)
-					//_, file, line, _ := runtime.Caller(3)
-					//log.Println(file+" "+strconv.Itoa(line), "distributed cache hit:", k, string(res.Value))
-
-					// should not store the remote data from other peers
-					return ByteView{b: res.Value}, nil
+					// should store the remote data from other peers in hotCache,
+					// but we can't store every key from remote. only P = 1/10
+					v := ByteView{b: res.Value}
+					if rand.Intn(10) == 0 {
+						g.populateCache(k, v, &g.hotCache)
+					}
+					return v, nil
 				}
 				atomic.AddUint64(&g.Stats.PeerErrors, 1)
 			}
 		}
 
-		// not got in cache, then got in g.Getter and store in cache locally
+		// not got in local cache, then got in g.Getter and store in mainCache locally
 		bs, err := g.getter(ctx, k)
 		if err != nil {
 			atomic.AddUint64(&g.Stats.GetterFuncFailed, 1)
 			return ByteView{}, err
 		}
-		//_, file, line, _ := runtime.Caller(3)
-		//log.Println(file+" "+strconv.Itoa(line), "getter function hit:", k, string(bs))
+
 		atomic.AddUint64(&g.Stats.GetterFuncFrom, 1)
 		bw := ByteView{b: cloneBytes(bs)}
+
 		// populate local cache
-		g.cache.set(k, bw)
+		g.populateCache(k, value, &g.mainCache)
 
 		return bw, nil
 	}
@@ -212,38 +223,60 @@ func (g *Group) Get(ctx context.Context, k string) (ByteView, error) {
 }
 
 func (g *Group) localCache(k string) (value ByteView, ok bool) {
-	return g.cache.get(k)
-}
-
-func (g *Group) Remove(k string) {
-	g.cache.remove(k)
-}
-
-// watch polling monitors expired keys and deletes them
-// should be started in making Group
-func (g *Group) watch() {
-	if g.q.keys == nil {
-		g.q.keys = make(chan string, DefaultQueueCap)
+	if g.nBytes <= 0 {
+		return
 	}
-	defer func() { close(g.q.keys) }()
 
+	value, ok = g.mainCache.get(k)
+	if ok {
+		return
+	}
+
+	value, ok = g.hotCache.get(k)
+	return
+}
+
+func (g *Group) populateCache(key string, value ByteView, cache *cacheProxy) {
+	if g.nBytes <= 0 {
+		return
+	}
+
+	cache.set(key, value)
+
+	// Evict items from cache(s) if necessary.
 	for {
-		//log.Println("watch: ", g.namespace)
-		k := g.q.subscribe()
-		//log.Println("get k:", k)
-		g.Remove(k)
-		//log.Println("remove:", k)
-		time.Sleep(time.Second) // delay one second to avoid to reduce cache hit rate and get lock frequently
+		mainBytes := g.mainCache.nBytes()
+		hotBytes := g.hotCache.nBytes()
+		if mainBytes+hotBytes <= g.nBytes /*no eviction*/ {
+			return
+		}
+
+		// need eviction
+		victim := &g.mainCache
+		if hotBytes > mainBytes/8 {
+			/*if hotCache is 1/8 of mainCache, will evict old key on hotCache*/
+			victim = &g.hotCache
+		}
+		victim.removeOldest()
 	}
 }
 
-// Publish not blocked
-func (g *Group) Publish(k string) {
-	go g.q.Publish(k)
-}
+type CacheType uint8
 
-func (g *Group) CacheStates() CacheStats {
-	return g.cache.stats()
+const (
+	MainCache = iota + 1
+	HotCache
+)
+
+func (g *Group) CacheStates(cacheType CacheType) CacheStats {
+	switch cacheType {
+	case MainCache:
+		return g.mainCache.stats()
+	case HotCache:
+		return g.hotCache.stats()
+	default:
+		return CacheStats{}
+	}
 }
 
 // cacheProxy proxy of lru_k.cache to add other functions,
@@ -298,6 +331,7 @@ func (c *cacheProxy) set(key string, value ByteView) {
 func (c *cacheProxy) get(key string) (value ByteView, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	c.nget++
 	if c.cache == nil {
 		return
@@ -311,15 +345,15 @@ func (c *cacheProxy) get(key string) (value ByteView, ok bool) {
 	return
 }
 
-func (c *cacheProxy) remove(k string) {
+func (c *cacheProxy) removeOldest() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.nevict--
-	c.cache.Remove(k)
+	c.cache.RemoveOldest()
 }
 
-// CacheStats is state of current cache
+// CacheStats is state of current mainCache
 type CacheStats struct {
 	Bytes     int64
 	Items     int64

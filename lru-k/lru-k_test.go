@@ -17,7 +17,7 @@ func TestGet(t *testing.T) {
 		{"miss", "myKey", "nonsense", false},
 	}
 	for _, tt := range getTests {
-		lru := NewCache(2, WithMaxItem(2), WithInactiveLimit(1))
+		lru := NewCache(2)
 		lru.Set(tt.keyToAdd, 1234)
 		val, ok := lru.Get(tt.keyToGet)
 		if ok != tt.expectedOk {
@@ -29,7 +29,7 @@ func TestGet(t *testing.T) {
 }
 
 func TestRemove(t *testing.T) {
-	lru := NewCache(2, WithMaxItem(2), WithInactiveLimit(1))
+	lru := NewCache(2)
 	lru.Set("myKey", 1234)
 	if val, ok := lru.Get("myKey"); !ok {
 		t.Fatal("TestRemove returned no match")
@@ -37,7 +37,7 @@ func TestRemove(t *testing.T) {
 		t.Fatalf("TestRemove failed.  Expected %d, got %v", 1234, val)
 	}
 
-	lru.Remove("myKey")
+	//lru.Remove("myKey")
 	if _, ok := lru.Get("myKey"); ok {
 		t.Fatal("TestRemove returned a removed entry")
 	}
@@ -49,7 +49,7 @@ func TestEliminate(t *testing.T) {
 		OnEliminateKeys = append(OnEliminateKeys, key)
 	}
 
-	lru := NewCache(2, WithMaxItem(40), WithInactiveLimit(20), WithOnEliminate(OnEliminateFun))
+	lru := NewCache(2, WithOnEliminate(OnEliminateFun))
 	for i := 0; i < 20; i++ {
 		lru.Set(fmt.Sprintf("myKey%d", i), 1234)
 	}
@@ -81,7 +81,7 @@ func TestHotKey(t *testing.T) {
 		OnEliminateKeys = append(OnEliminateKeys, key)
 	}
 
-	lru := NewCache(2, WithMaxItem(40), WithInactiveLimit(20), WithOnEliminate(OnEliminateFun))
+	lru := NewCache(2, WithOnEliminate(OnEliminateFun))
 	for i := 0; i < 20; i++ {
 		lru.Set(fmt.Sprintf("myKey%d", i), 1234)
 	}

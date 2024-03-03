@@ -33,7 +33,7 @@ var db = []map[string]string{
 }
 
 func createGroup(i int) *cb_cache.Group {
-	return cb_cache.NewGroup("scores", 2<<10, cb_cache.WithGetter(
+	return cb_cache.NewGroup("scores", 2<<10, 2<<5, cb_cache.WithGetter(
 		func(ctx context.Context, key string) ([]byte, error) {
 			log.Println("[db] search key", key)
 			if i == -1 {
@@ -63,9 +63,6 @@ func startAPIServer(apiAddr string, gee *cb_cache.Group) {
 				db[1]["d"] = "d"
 				db[2]["g"] = "g"
 				log.Println(db)
-				gee.Publish("a")
-				gee.Publish("d")
-				gee.Publish("g")
 				return
 			}
 			view, err := gee.Get(context.Background(), key)

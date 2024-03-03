@@ -29,7 +29,7 @@ func TestGroup_Get(t *testing.T) {
 			fields: fields{
 				namespace: "rank",
 				cache: cacheProxy{
-					cache: lruk.NewCache(2, lruk.WithMaxItem(2), lruk.WithInactiveLimit(1)),
+					cache: lruk.NewCache(2),
 				},
 				getter: func(ctx context.Context, k string) (v []byte, err error) {
 					if k == "key1" {
@@ -53,7 +53,7 @@ func TestGroup_Get(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := &Group{
 				namespace: tt.fields.namespace,
-				cache:     tt.fields.cache,
+				mainCache: tt.fields.cache,
 				getter:    tt.fields.getter,
 			}
 			got, err := g.Get(tt.args.ctx, tt.args.k)
