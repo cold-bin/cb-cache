@@ -13,12 +13,14 @@ import (
 type etcd struct {
 	mu sync.Mutex
 
-	client    *etcdv3.Client
+	kv        etcdv3.KV
+	watcher   etcdv3.Watcher
+	grantid   etcdv3.LeaseID
 	endpoints []string
 	prefix    string
 }
 
-func New(prefix string, endpoints []string) (Client, error) {
+func New(ctx context.Context, prefix string, endpoints []string) (Client, error) {
 	client, err := etcdv3.New(etcdv3.Config{
 		Endpoints:   endpoints,
 		DialTimeout: 5 * time.Second,
@@ -26,40 +28,48 @@ func New(prefix string, endpoints []string) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	lease := etcdv3.NewLease(client)
+	grant, err := lease.Grant(ctx, keepAliveTTL)
+	if err != nil {
+		return nil, err
+	}
+
+	ch, err := lease.KeepAlive(ctx, grant.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		for range ch {
+		}
+	}()
+
 	return &etcd{
-		client:    client,
+		kv:        etcdv3.NewKV(client),
+		watcher:   etcdv3.NewWatcher(client),
+		grantid:   grant.ID,
 		endpoints: endpoints,
 		prefix:    prefix,
 	}, nil
 }
 
-// Register a node
+// Register a node and start goroutine to keep lease
 func (r *etcd) Register(ctx context.Context, addr string) error {
-	kv := etcdv3.NewKV(r.client)
-	lease := etcdv3.NewLease(r.client)
-	grant, err := lease.Grant(ctx, keepAliveTTL)
-	if err != nil {
-		return err
-	}
 	key := fmt.Sprintf("%s%s", r.prefix, addr)
-	if _, err := kv.Put(ctx, key, addr, etcdv3.WithLease(grant.ID)); err != nil {
-		return err
-	}
-	ch, err := lease.KeepAlive(ctx, grant.ID)
-	if err != nil {
-		return err
-	}
-	go func() {
-		for range ch {
-		}
-	}()
-	return nil
+	_, err := r.kv.Put(ctx, key, addr, etcdv3.WithLease(r.grantid))
+	return err
+}
+
+func (r *etcd) Deregister(ctx context.Context, addr string) error {
+	key := fmt.Sprintf("%s%s", r.prefix, addr)
+	_, err := r.kv.Delete(ctx, key, etcdv3.WithLease(r.grantid))
+	return err
 }
 
 // GetAddress get all active node's address
 func (r *etcd) GetAddress(ctx context.Context) ([]string, error) {
-	kv := etcdv3.NewKV(r.client)
-	resp, err := kv.Get(ctx, r.prefix, etcdv3.WithPrefix())
+	resp, err := r.kv.Get(ctx, r.prefix, etcdv3.WithPrefix())
 	if err != nil {
 		return nil, err
 	}
@@ -74,8 +84,7 @@ func (r *etcd) GetAddress(ctx context.Context) ([]string, error) {
 // case 1: maybe some nodes are broken, then other clients will delete it
 // case 2: some nodes are added, then other clients will add it
 func (r *etcd) Watch(ctx context.Context) <-chan Event {
-	watcher := etcdv3.NewWatcher(r.client)
-	watchChan := watcher.Watch(ctx, r.prefix, etcdv3.WithPrefix())
+	watchChan := r.watcher.Watch(ctx, r.prefix, etcdv3.WithPrefix())
 	ch := make(chan Event, eventChanSize)
 	go func() {
 		for watchRsp := range watchChan {
