@@ -16,6 +16,7 @@ type Client interface {
 
 type Registry interface {
 	Register(ctx context.Context, addr string) error
+	Deregister(ctx context.Context, addr string) error
 }
 
 type Discovery interface {
