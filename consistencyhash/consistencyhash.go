@@ -45,14 +45,31 @@ func NewMap(replica int, opts ...MOpt) *Map {
 
 // Set adds some keys into hash
 func (m *Map) Set(keys ...string) {
+	m.resetKeys(func(key string, hash int) {
+		m.hashMap[hash] = key
+	}, keys)
+}
+
+func (m *Map) Remove(keys ...string) {
+	m.resetKeys(func(key string, hash int) {
+		delete(m.hashMap, hash)
+	}, keys)
+}
+
+// 重置keys
+func (m *Map) resetKeys(fn func(key string, hash int), keys []string) {
 	for _, key := range keys {
 		for i := 0; i < m.replica; i++ {
-			// just 64-bit system
 			hash := int(m.hash(conv.QuickS2B(strconv.Itoa(i) + key)))
-			m.keys = append(m.keys, hash)
-			m.hashMap[hash] = key
+			fn(key, hash)
 		}
 	}
+
+	newKeys := make([]int, 0, len(m.hashMap))
+	for key := range m.hashMap {
+		newKeys = append(newKeys, key)
+	}
+	m.keys = newKeys
 	sort.Ints(m.keys)
 }
 

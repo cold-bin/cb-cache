@@ -1,8 +1,10 @@
 package cb_cache
 
 import (
+	"context"
 	"fmt"
 	"github.com/cold-bin/cb-cache/consistencyhash"
+	"github.com/cold-bin/cb-cache/registry"
 	"github.com/cold-bin/cb-cache/serialization"
 	"github.com/cold-bin/cb-cache/serialization/pb"
 	"net/http"
@@ -97,6 +99,57 @@ func (c *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+}
+
+func (c *HTTPPool) EtcdRegistry(ctx context.Context, etcdAddrs ...string) error {
+	c.mu.Lock()
+	r, err := registry.New("_cb-cache/", etcdAddrs)
+	if err != nil {
+		return err
+	}
+	if err := r.Register(ctx, c.self); err != nil {
+		return err
+	}
+	watch := r.Watch(ctx)
+	// get all active peers
+	peers, err := r.GetAddress(ctx)
+	if err != nil {
+		return err
+	}
+	c.peers = consistencyhash.NewMap(defaultReplicas, nil)
+	c.peers.Set(peers...)
+	c.httpGetters = make(map[string]*httpGetter, len(peers))
+	for _, peer := range peers {
+		c.httpGetters[peer] = &httpGetter{baseURL: peer + c.basePath}
+	}
+	c.mu.Unlock()
+	// watch etcd event and manager local peers
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-watch:
+				// 通道已经被关闭
+				if !ok {
+					return
+				}
+				c.mu.Lock()
+				switch event.Type {
+				case registry.PUT:
+					c.peers.Set(event.Address)
+					c.httpGetters[event.Address] = &httpGetter{baseURL: event.Address + c.basePath}
+				case registry.REMOVE:
+					c.peers.Remove(event.Address)
+					delete(c.httpGetters, event.Address)
+				default:
+					panic(fmt.Sprintf("[cb-cache]: not support the type:%s", event.Type))
+				}
+				c.mu.Unlock()
+			}
+		}
+	}()
+	return nil
 }
 
 func (c *HTTPPool) Set(peers ...string) {
