@@ -73,6 +73,7 @@ type GetterFunc func(ctx context.Context, k string) (v []byte, err error)
 type Group struct {
 	namespace string
 	nBytes    int64 // max bytes
+	nHotBytes int64 // max hot bytes
 
 	mainCache cacheProxy // cached hot keys from local machine
 	hotCache  cacheProxy // cached hot keys from remote machine to avoid to request the same keys again
@@ -108,11 +109,20 @@ func WithGetter(getter GetterFunc) GOption {
 	}
 }
 
+func WithHotCacheBytes(cacheBytes int64) GOption {
+	return func(g *Group) {
+		if cacheBytes <= 0 {
+			panic("hot cache must be greater than 0")
+		}
+		g.nHotBytes = cacheBytes
+	}
+}
+
 // NewGroup
 // nBytes: max bytes of group
 // maxitems: config of lru-k
 // nBytes will
-func NewGroup(namespace string, nBytes int64, maxitems int, opts ...GOption) *Group {
+func NewGroup(namespace string, nBytes int64, opts ...GOption) *Group {
 	gmu.Lock()
 	defer gmu.Unlock()
 
@@ -208,12 +218,11 @@ func (g *Group) Get(ctx context.Context, k string) (ByteView, error) {
 			atomic.AddUint64(&g.Stats.GetterFuncFailed, 1)
 			return ByteView{}, err
 		}
-
 		atomic.AddUint64(&g.Stats.GetterFuncFrom, 1)
 		bw := ByteView{b: cloneBytes(bs)}
 
 		// populate local cache
-		g.populateCache(k, value, &g.mainCache)
+		g.populateCache(k, bw, &g.mainCache)
 
 		return bw, nil
 	}
@@ -247,6 +256,12 @@ func (g *Group) populateCache(key string, value ByteView, cache *cacheProxy) {
 	for {
 		mainBytes := g.mainCache.nBytes()
 		hotBytes := g.hotCache.nBytes()
+
+		// need eviction
+		if g.nHotBytes <= hotBytes {
+			g.hotCache.removeOldest()
+		}
+
 		if mainBytes+hotBytes <= g.nBytes /*no eviction*/ {
 			return
 		}

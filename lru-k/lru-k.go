@@ -31,8 +31,8 @@ type cache struct {
 	onEliminate func(k string, v any)
 }
 
-// entry is used in cache.inactiveList
-type entry struct {
+// Entry is used in cache.inactiveList
+type Entry struct {
 	k   string
 	v   any
 	cnt uint64 // visited times
@@ -64,7 +64,7 @@ func (c *cache) Get(k string) (v any, ok bool) {
 	}
 
 	if e, ok_ := c.inactiveMap[k]; ok_ { /*first in inactive list*/
-		entry := e.Value.(*entry)
+		entry := e.Value.(*Entry)
 		entry.cnt++
 		if entry.cnt >= 2 { /*move to real cache*/
 			c.moveToRealCache(entry, e)
@@ -77,17 +77,17 @@ func (c *cache) Get(k string) (v any, ok bool) {
 
 	if e, ok_ := c.activeMap[k]; ok_ { /*maybe in active list*/
 		c.activeList.MoveToFront(e)
-		v, ok = e.Value.(*entry).v, true
-	} else { /*not in cache*/
-		v, ok = nil, false
+		v, ok = e.Value.(*Entry).v, true
+		return
 	}
-
+	v, ok = nil, false
 	return
 }
 
-func (c *cache) moveToRealCache(entry_ *entry, e *list.Element) {
+func (c *cache) moveToRealCache(entry_ *Entry, e *list.Element) {
 	c.activeList.PushFront(entry_)
 	c.activeMap[entry_.k] = e
+
 	c.inactiveList.Remove(e)
 	delete(c.inactiveMap, entry_.k)
 }
@@ -98,7 +98,7 @@ func (c *cache) Set(k string, v any) {
 	}
 
 	if e, ok_ := c.inactiveMap[k]; ok_ { /*if k is hit in inactive list*/
-		entry := e.Value.(*entry)
+		entry := e.Value.(*Entry)
 		entry.v = v
 		entry.cnt++
 		if entry.cnt >= 2 { /*move to real cache*/
@@ -110,10 +110,10 @@ func (c *cache) Set(k string, v any) {
 	}
 
 	if e, ok_ := c.activeMap[k]; ok_ { /*maybe hit in active list*/
-		e.Value.(*entry).v = v
+		e.Value.(*Entry).v = v
 		c.activeList.MoveToFront(e)
 	} else { /*not in cache,place the item inactive list*/
-		e := c.inactiveList.PushFront(&entry{k: k, v: v})
+		e := c.inactiveList.PushFront(&Entry{k: k, v: v})
 		c.inactiveMap[k] = e
 	}
 }
@@ -125,14 +125,16 @@ func (c *cache) RemoveOldest() {
 	}
 
 	if len(c.inactiveMap) != 0 {
-		e := c.inactiveList.Remove(c.inactiveList.Back()).(*entry)
+		e := c.inactiveList.Remove(c.inactiveList.Back()).(*Entry)
 		delete(c.inactiveMap, e.k)
+		c.onEliminate(e.k, e.v)
 		return
 	}
 
 	if len(c.activeMap) != 0 {
-		e := c.activeList.Remove(c.activeList.Back()).(*entry)
+		e := c.activeList.Remove(c.activeList.Back()).(*Entry)
 		delete(c.activeMap, e.k)
+		c.onEliminate(e.k, e.v)
 		return
 	}
 }
@@ -140,7 +142,7 @@ func (c *cache) RemoveOldest() {
 func (c *cache) Clear() {
 	if c.onEliminate != nil {
 		for _, e := range c.activeMap {
-			kv := e.Value.(*entry)
+			kv := e.Value.(*Entry)
 			c.onEliminate(kv.k, kv.v)
 		}
 	}

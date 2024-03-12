@@ -103,7 +103,7 @@ func (c *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (c *HTTPPool) EtcdRegistry(ctx context.Context, etcdAddrs ...string) error {
 	c.mu.Lock()
-	r, err := registry.New("_cb-cache/", etcdAddrs)
+	r, err := registry.New(ctx, "_cb-cache/", etcdAddrs)
 	if err != nil {
 		return err
 	}
@@ -116,7 +116,7 @@ func (c *HTTPPool) EtcdRegistry(ctx context.Context, etcdAddrs ...string) error 
 	if err != nil {
 		return err
 	}
-	c.peers = consistencyhash.NewMap(defaultReplicas, nil)
+	c.peers = consistencyhash.NewMap(defaultReplicas, consistencyhash.WithHash(c.hashFn))
 	c.peers.Set(peers...)
 	c.httpGetters = make(map[string]*httpGetter, len(peers))
 	for _, peer := range peers {
