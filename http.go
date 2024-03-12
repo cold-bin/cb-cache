@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultBasePath = "/_cb-cache/"
+	DefaultBasePath = "/_cb-cache/"
 	defaultReplicas = 50
 )
 
@@ -45,7 +45,7 @@ func WithSerializer(codec serialization.Serializer) HPOpt {
 func NewHTTPPool(self string, replica int, opts ...HPOpt) *HTTPPool {
 	h := &HTTPPool{
 		self:     self,
-		basePath: defaultBasePath,
+		basePath: DefaultBasePath,
 		replica:  replica,
 	}
 
