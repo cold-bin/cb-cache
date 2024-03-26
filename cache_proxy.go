@@ -95,14 +95,6 @@ func WithRetirementPolicy(cache1, cache2 lruk.Cache) GOption {
 	}
 }
 
-// WithConcurrentMaxGNum prevents goroutines blocking issues caused by a large number of client accesses when the mainCache is broken down.
-// if maxg <=0, mean that there is no limit to visit
-func WithConcurrentMaxGNum(maxg int64) GOption {
-	return func(g *Group) {
-		g.loader.SetMaxg(maxg)
-	}
-}
-
 func WithGetter(getter GetterFunc) GOption {
 	return func(g *Group) {
 		g.getter = getter
